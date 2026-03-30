@@ -1,25 +1,28 @@
-name: Deploy
+name: Deploy Stack
 
 on:
   push:
-    branches:
-      - main
-  workflow_dispatch:   # cho phép trigger thủ công từ GitHub UI
+    branches: ["main"]
+  workflow_dispatch:
 
 jobs:
   deploy:
-    name: Deploy to self-hosted server
-    runs-on: self-hosted   # chạy trên máy chủ của bạn, không phải VM GitHub
+    runs-on: self-hosted
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # Kiểm tra .env đã tồn tại chưa (file này không commit lên git)
+      - name: Prepare artifact folders
+        run: |
+          mkdir -p artifacts/docker-runtime/compose-files
+          cp docker-compose.yml artifacts/docker-runtime/compose-files/docker-compose.yml
+          if [ -f .env ]; then cp .env artifacts/docker-runtime/compose-files/.env; fi
+
       - name: Check .env exists
         run: |
           if [ ! -f .env ]; then
-            echo "ERROR: .env file not found. Copy .env.example and fill in values."
+            echo "ERROR: .env file not found. Create .env from .env.example and fill values."
             exit 1
           fi
 
@@ -29,11 +32,46 @@ jobs:
       - name: Build & start services
         run: docker compose up -d --build --remove-orphans
 
-      - name: Remove unused images
+      - name: Clean up unused images
         run: docker image prune -f
 
       - name: Health check
         run: |
-          echo "Waiting for app to start..."
+          echo "Waiting for services..."
           sleep 5
           docker compose ps
+
+      - name: Collect docker runtime artifacts
+        if: always()
+        run: |
+          set +e
+          OUT_DIR="artifacts/docker-runtime"
+          mkdir -p "$OUT_DIR/logs"
+
+          docker compose ps -a > "$OUT_DIR/compose-ps.txt" 2>&1
+          docker compose images > "$OUT_DIR/compose-images.txt" 2>&1
+          docker compose logs --no-color > "$OUT_DIR/compose-logs.txt" 2>&1
+          docker ps -a > "$OUT_DIR/docker-ps.txt" 2>&1
+          docker images > "$OUT_DIR/docker-images.txt" 2>&1
+          docker system df > "$OUT_DIR/docker-system-df.txt" 2>&1
+
+          CONTAINERS=$(docker compose ps -q)
+          if [ -n "$CONTAINERS" ]; then
+            for c in $CONTAINERS; do
+              docker inspect "$c" > "$OUT_DIR/inspect-$c.json" 2>&1
+              docker logs "$c" > "$OUT_DIR/logs/$c.log" 2>&1
+            done
+          fi
+
+          if [ -d logs ]; then
+            cp -r logs "$OUT_DIR/app-logs"
+          fi
+
+      - name: Upload docker runtime artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-runtime
+          path: artifacts/docker-runtime
+          if-no-files-found: warn
+          retention-days: 7

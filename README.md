@@ -111,6 +111,16 @@ docker compose up -d --build
 
 Hoặc push code lên nhánh `main` — pipeline tự động chạy.
 
+### Artifacts sau mỗi lần CI/CD chạy
+
+- **Azure Pipelines** và **GitHub Actions** đều thu thập artifacts runtime sau deploy.
+- Artifact tên `docker-runtime` bao gồm:
+  - trạng thái container/images (`docker compose ps/images`, `docker ps/images`),
+  - log tổng hợp (`docker compose logs`),
+  - `docker inspect` + log riêng cho từng container,
+  - snapshot thư mục `logs/` (nếu có).
+- Mục đích: hỗ trợ debug nhanh khi deploy lỗi hoặc service bất thường.
+
 ---
 
 ## Cấu hình .env

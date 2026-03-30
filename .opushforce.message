@@ -1,0 +1,7 @@
+Mình đã điều chỉnh rõ phần “P0 + P1 trọng yếu” trong tài liệu đánh giá thành một baseline pre-go-live cụ thể: tách riêng mục P0 bắt buộc và P1 trọng yếu cần hoàn tất ngay sau P0 để bạn dễ dùng như checklist triển khai thực tế.
+
+Mình đã cập nhật Azure Pipeline để luôn tạo artifacts runtime sau mỗi lần chạy (kể cả khi job lỗi) và publish artifact docker-runtime, bao gồm trạng thái compose/docker, logs tổng hợp, inspect/log theo từng container, và snapshot thư mục logs/ nếu có.
+
+Mình đã thêm workflow GitHub Actions (.github/workflows/deploy.yml) với cùng logic deploy + thu thập artifact docker-runtime sau mỗi lần chạy (push main/workflow_dispatch) để đồng nhất với Azure Pipeline như bạn yêu cầu.
+
+Mình cũng bổ sung README để mô tả rõ artifacts được thu thập sau CI/CD và mục đích debug vận hành nhanh.
