@@ -125,7 +125,7 @@ services:
       - "-o"
       - "ConnectTimeout=10"
       - "${CUR_WHOAMI:-runner}@host.docker.internal"
-      - "cd ${CUR_WORK_DIR:-/home/runner/work} && exec bash"
+      # - "cd ${CUR_WORK_DIR:-/home/runner/work} && exec bash"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
