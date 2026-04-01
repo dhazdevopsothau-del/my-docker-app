@@ -44,8 +44,7 @@ services:
     hostname: docker-host
     environment:
       TS_AUTHKEY: "${TS_CLIENT_SECRET}"
-      TS_AUTHKEY: ""                              # ← bỏ trống
-      TS_EXTRA_ARGS: ""   # ← không cần nữa
+      TS_EXTRA_ARGS: ""
       TS_STATE_DIR: /var/lib/tailscale
       TS_USERSPACE: "false"
       TS_CLIENT_ID: "${TS_CLIENT_ID}"
