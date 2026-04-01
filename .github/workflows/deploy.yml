@@ -20,60 +20,91 @@ jobs:
       # ----------------------------------------------------------------
       #  2. Pull .env + credentials từ Firebase RTDB
       # ----------------------------------------------------------------
+      # - name: Pull .env & credentials from RTDB
+      #   run: |
+      #     npm install -g @tltdh61/dotenvrtdb
+      #     mkdir -p services/webssh/.ssh
+      #     dotenvrtdb -e .env --pull -eUrl="$RTDB_URL" \
+      #       --writefilebase64=./cloudflared-credentials.json \
+      #       --var=CLOUDFLARED_TUNNEL_CREDENTIALS_BASE64 \
+      #       --writefilebase64=./services/webssh/.ssh/id_rsa \
+      #       --var=SSH_PULL_DATA_PRIVATE_KEY_BASE64 \
+      #       --writefilebase64=./services/webssh/.ssh/known_hosts \
+      #       --var=SSH_RUNNER_PUBLIC_KEY_BASE64
+      #     chmod 600 services/webssh/.ssh/id_rsa || true
       - name: Pull .env & credentials from RTDB
         run: |
           npm install -g @tltdh61/dotenvrtdb
           mkdir -p services/webssh/.ssh
           dotenvrtdb -e .env --pull -eUrl="$RTDB_URL" \
             --writefilebase64=./cloudflared-credentials.json \
-            --var=CLOUDFLARED_TUNNEL_CREDENTIALS_BASE64 \
-            --writefilebase64=./services/webssh/.ssh/id_rsa \
-            --var=SSH_PULL_DATA_PRIVATE_KEY_BASE64 \
-            --writefilebase64=./services/webssh/.ssh/known_hosts \
-            --var=SSH_RUNNER_PUBLIC_KEY_BASE64
-          chmod 600 services/webssh/.ssh/id_rsa || true
+            --var=CLOUDFLARED_TUNNEL_CREDENTIALS_BASE64
 
-      - name: Verify SSH files & restart sshd
+      # ----------------------------------------------------------------
+      #  2b. Generate SSH keypair & setup authorized_keys
+      # ----------------------------------------------------------------
+      - name: Generate SSH keypair & setup sshd
         run: |
-          # Cho phép container đọc được (container root vẫn cần permission)
-          chmod 644 ./services/webssh/.ssh/id_rsa
-          echo "====== Check id_rsa ======"
-          if [ -f ./services/webssh/.ssh/id_rsa ]; then
-            # Fix trailing newline bị mất khi base64 decode
-            echo "" >> ./services/webssh/.ssh/id_rsa
-            echo "✅ id_rsa exists ($(wc -c < ./services/webssh/.ssh/id_rsa) bytes)"
-            head -1 ./services/webssh/.ssh/id_rsa | grep -q 'BEGIN' \
-              && echo "✅ valid private key format" \
-              || { echo "❌ invalid format"; exit 1; }
-          else
-            echo "❌ id_rsa NOT found"; exit 1
-          fi
+          mkdir -p services/webssh/.ssh
 
-          echo "====== Fix & check known_hosts ======"
-          if [ -f ./services/webssh/.ssh/known_hosts ]; then
-            # Nếu chưa có hostname prefix thì thêm vào
-            if ! grep -q 'host.docker.internal' ./services/webssh/.ssh/known_hosts; then
-              sed -i 's/^/host.docker.internal /' ./services/webssh/.ssh/known_hosts
-              echo "✅ Fixed known_hosts — added hostname prefix"
-            fi
-            echo "✅ known_hosts:"
-            cat ./services/webssh/.ssh/known_hosts | sed 's/^/  /'
-          else
-            echo "⚠️  known_hosts not found"
-          fi
+          # Tạo key mới mỗi lần deploy
+          ssh-keygen -t ed25519 -f ./services/webssh/.ssh/id_rsa -N "" -q
+          echo "✅ SSH keypair generated"
 
-          echo "====== Add pubkey vào authorized_keys của runner ======"
+          # Add public key vào authorized_keys của runner
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          ssh-keygen -y -f ./services/webssh/.ssh/id_rsa >> ~/.ssh/authorized_keys
+          cat ./services/webssh/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
           chmod 600 ~/.ssh/authorized_keys
-          echo "✅ Public key added"
+          echo "✅ Public key added to authorized_keys"
 
-          echo "====== Restart & verify sshd ======"
+          # Restart sshd
           sudo systemctl restart ssh
           sleep 1
           sudo systemctl is-active ssh \
             && echo "✅ sshd is running" \
-            || { echo "❌ sshd failed to start"; exit 1; }
+            || { echo "❌ sshd failed"; exit 1; }
+
+      # - name: Verify SSH files & restart sshd
+      #   run: |
+      #     # Cho phép container đọc được (container root vẫn cần permission)
+      #     chmod 644 ./services/webssh/.ssh/id_rsa
+      #     echo "====== Check id_rsa ======"
+      #     if [ -f ./services/webssh/.ssh/id_rsa ]; then
+      #       # Fix trailing newline bị mất khi base64 decode
+      #       echo "" >> ./services/webssh/.ssh/id_rsa
+      #       echo "✅ id_rsa exists ($(wc -c < ./services/webssh/.ssh/id_rsa) bytes)"
+      #       head -1 ./services/webssh/.ssh/id_rsa | grep -q 'BEGIN' \
+      #         && echo "✅ valid private key format" \
+      #         || { echo "❌ invalid format"; exit 1; }
+      #     else
+      #       echo "❌ id_rsa NOT found"; exit 1
+      #     fi
+
+      #     echo "====== Fix & check known_hosts ======"
+      #     if [ -f ./services/webssh/.ssh/known_hosts ]; then
+      #       # Nếu chưa có hostname prefix thì thêm vào
+      #       if ! grep -q 'host.docker.internal' ./services/webssh/.ssh/known_hosts; then
+      #         sed -i 's/^/host.docker.internal /' ./services/webssh/.ssh/known_hosts
+      #         echo "✅ Fixed known_hosts — added hostname prefix"
+      #       fi
+      #       echo "✅ known_hosts:"
+      #       cat ./services/webssh/.ssh/known_hosts | sed 's/^/  /'
+      #     else
+      #       echo "⚠️  known_hosts not found"
+      #     fi
+
+      #     echo "====== Add pubkey vào authorized_keys của runner ======"
+      #     mkdir -p ~/.ssh && chmod 700 ~/.ssh
+      #     ssh-keygen -y -f ./services/webssh/.ssh/id_rsa >> ~/.ssh/authorized_keys
+      #     chmod 600 ~/.ssh/authorized_keys
+      #     echo "✅ Public key added"
+
+      #     echo "====== Restart & verify sshd ======"
+      #     sudo systemctl restart ssh
+      #     sleep 1
+      #     sudo systemctl is-active ssh \
+      #       && echo "✅ sshd is running" \
+      #       || { echo "❌ sshd failed to start"; exit 1; }
 
       - name: Check .env exists
         run: |
