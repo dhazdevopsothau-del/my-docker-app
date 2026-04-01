@@ -4,7 +4,8 @@ on:
   # push:
   #   branches: ["main"]
   workflow_dispatch:
-
+env:
+  RTDB_URL: ${{ secrets.RTDB_URL }}
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -13,8 +14,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Npm install
-        env:
-          RTDB_URL: ${{ secrets.RTDB_URL }}
         run: |
           npm install -g @tltdh61/dotenvrtdb
           dotenvrtdb -e .env --pull -eUrl="$RTDB_URL"
@@ -31,12 +30,9 @@ jobs:
 
       - name: Clean up unused images
         run: docker image prune -f
-
-      - name: Health check
+      - name: Npm install
         run: |
-          echo "Waiting for services..."
-          sleep 5
-          docker compose ps
+          dotenvrtdb runner keepalive
 
       - name: Collect docker runtime artifacts
         if: always()
