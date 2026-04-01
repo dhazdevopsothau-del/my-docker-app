@@ -79,16 +79,16 @@ services:
   #  PORTAINER — Quản lý Docker toàn diện qua UI
   #  Có login riêng — không cần Caddy basicauth
   # ================================================================
-  portainer:
-    image: portainer/portainer-ce:latest
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - portainer_data:/data
-    labels:
-      - "caddy=http://${SUBDOMAIN_PORTAINER:-portainer-my-docker-app}.${DOMAIN}"
-      - "caddy.reverse_proxy={{upstreams 9000}}"
-    networks: [app_net]
-    restart: unless-stopped
+  # portainer:
+  #   image: portainer/portainer-ce:latest
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #     - portainer_data:/data
+  #   labels:
+  #     - "caddy=http://${SUBDOMAIN_PORTAINER:-portainer-my-docker-app}.${DOMAIN}"
+  #     - "caddy.reverse_proxy={{upstreams 9000}}"
+  #   networks: [app_net]
+  #   restart: unless-stopped
 
   # ================================================================
   #  DOZZLE — Xem log realtime của tất cả container
@@ -111,8 +111,9 @@ services:
   filebrowser:
     image: filebrowser/filebrowser:latest
     command: --noauth --port 80 --root /srv --database /database/filebrowser.db
+
     volumes:
-      - ./logs:/srv
+      - .:/srv
       - filebrowser_data:/database
     labels:
       - "caddy=http://${SUBDOMAIN_FILEBROWSER:-files-my-docker-app}.${DOMAIN}"
