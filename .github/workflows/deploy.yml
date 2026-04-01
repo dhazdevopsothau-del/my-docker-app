@@ -124,6 +124,22 @@ jobs:
       - name: Build & start services
         run: docker compose up -d --build --remove-orphans
 
+      - name: Debug SSH from inside webssh container
+        run: |
+          echo "====== Test SSH từ BÊN TRONG container ======"
+          docker compose exec webssh \
+            ssh -i /root/.ssh/id_rsa \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=5 \
+            -vvv \
+            runner@host.docker.internal "echo OK" 2>&1 || true
+
+          echo "====== Check id_rsa trong container ======"
+          docker compose exec webssh ls -la /root/.ssh/
+
+          echo "====== Check host.docker.internal từ container ======"
+          docker compose exec webssh ping -c 1 host.docker.internal || true
+
       - name: Clean up unused images
         run: docker image prune -f
       - name: dotenvrtdb runner keepalive
