@@ -1,4 +1,4 @@
-name: Deploy Stack
+name: Deploy Stack ubuntu-latest
 
 on:
   # push:
