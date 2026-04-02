@@ -1,0 +1,252 @@
+name: Deploy Stack
+
+on:
+  # push:
+  #   branches: ["main"]
+  workflow_dispatch:
+
+env:
+  RTDB_URL: ${{ secrets.RTDB_URL }}
+
+jobs:
+  deploy:
+    # ✅ Đổi ở đây để test: ubuntu-latest | windows-latest
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # ================================================================
+      #  Pull .env & credentials từ RTDB — chạy TRƯỚC để không bị
+      #  ghi đè các biến OS sinh ra ở bước sau
+      # ================================================================
+      - name: Pull .env & credentials from RTDB
+        shell: bash
+        run: |
+          npm install -g @tltdh61/dotenvrtdb
+          mkdir -p services/webssh/.ssh
+          dotenvrtdb -e .env --pull -eUrl="$RTDB_URL" \
+            --writefilebase64=./cloudflared-credentials.json \
+            --var=CLOUDFLARED_TUNNEL_CREDENTIALS_BASE64
+
+      # ================================================================
+      #  Detect OS → append vào .env + export GITHUB_ENV cho các step sau
+      #  Chạy SAU pull để tránh bị ghi đè
+      # ================================================================
+      - name: Detect OS environment
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            CUR_OS="windows"
+            DOCKER_SOCK="//./pipe/docker_engine"
+            COMPOSE_PROFILES="windows-only"
+          else
+            CUR_OS="linux"
+            DOCKER_SOCK="/var/run/docker.sock"
+            COMPOSE_PROFILES="linux-only"
+          fi
+
+          COMPOSE_PROJECT_NAME="$(basename "$GITHUB_WORKSPACE")"
+          CUR_WORK_DIR="$GITHUB_WORKSPACE"
+          CUR_WHOAMI="$(whoami)"
+
+          # Append vào .env (dùng cho docker compose)
+          echo "CUR_OS=$CUR_OS"                             >> .env
+          echo "DOCKER_SOCK=$DOCKER_SOCK"                   >> .env
+          echo "COMPOSE_PROFILES=$COMPOSE_PROFILES"         >> .env
+          echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME" >> .env
+          echo "CUR_WORK_DIR=$CUR_WORK_DIR"                 >> .env
+          echo "CUR_WHOAMI=$CUR_WHOAMI"                     >> .env
+
+          # Export GITHUB_ENV để các step sau dùng trực tiếp
+          echo "CUR_OS=$CUR_OS"                             >> "$GITHUB_ENV"
+          echo "DOCKER_SOCK=$DOCKER_SOCK"                   >> "$GITHUB_ENV"
+          echo "COMPOSE_PROFILES=$COMPOSE_PROFILES"         >> "$GITHUB_ENV"
+          echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME" >> "$GITHUB_ENV"
+
+      # ================================================================
+      #  Switch Docker sang Linux engine — CHỈ chạy trên Windows
+      #  Windows runner mặc định ở Windows container mode → pull Linux
+      #  image sẽ fail với "no matching manifest for windows/amd64"
+      # ================================================================
+      # Path: .github/workflows/deploy.yml
+      # Thay thế step "Switch Docker to Linux engine (Windows only)" bằng nội dung sau:
+
+      # ================================================================
+      #  Windows: KHÔNG cần switch engine
+      #  Docker trên GitHub-hosted windows-latest = Windows containers
+      #  Giải pháp: chạy ttyd trực tiếp trên host (không dùng container)
+      #  Caddy proxy vào host.docker.internal:7681
+      # ================================================================
+      - name: Install and start ttyd on Windows host
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # ── Download ttyd binary ──────────────────────────────────────
+          $ttydUrl  = "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.win32.exe"
+          $ttydPath = "$env:TEMP\ttyd.exe"
+
+          Write-Host "Downloading ttyd..."
+          Invoke-WebRequest -Uri $ttydUrl -OutFile $ttydPath -UseBasicParsing
+          Write-Host "✅ ttyd downloaded to $ttydPath"
+
+          # ── Chọn shell tốt nhất có sẵn ────────────────────────────────
+          $shell = $null
+          @("pwsh", "powershell") | ForEach-Object {
+            if (-not $shell -and (Get-Command $_ -ErrorAction SilentlyContinue)) {
+              $shell = $_
+            }
+          }
+          if (-not $shell) { $shell = "cmd" }
+          Write-Host "Using shell: $shell"
+
+          # ── Ghi shell path vào .env để Caddy label dùng ──────────────
+          echo "WEBSSH_SHELL=$shell" >> .env
+
+          # ── Mở firewall cho port 7681 ─────────────────────────────────
+          New-NetFirewallRule `
+            -DisplayName "ttyd-webssh" `
+            -Direction Inbound `
+            -Protocol TCP `
+            -LocalPort 7681 `
+            -Action Allow `
+            -ErrorAction SilentlyContinue | Out-Null
+          Write-Host "✅ Firewall rule added for port 7681"
+
+          # ── Start ttyd như background job ─────────────────────────────
+          # -W  : writable (cho phép input)
+          # -p  : port
+          # -t  : terminal theme
+          # -t fontSize=15
+          # credential: CADDY_AUTH_USER / CADDY_AUTH_HASH không dùng được trực tiếp
+          # → dùng Caddy basic_auth làm lớp bảo vệ, ttyd không cần auth riêng
+          $ttydArgs = @(
+            "-W",
+            "-p", "7681",
+            "-t", "fontSize=15",
+            "-t", "theme={`"background`":`"#1e1e1e`"}",
+            $shell
+          )
+
+          $proc = Start-Process `
+            -FilePath $ttydPath `
+            -ArgumentList $ttydArgs `
+            -WindowStyle Hidden `
+            -PassThru
+
+          Write-Host "✅ ttyd started (PID=$($proc.Id)) on port 7681 with shell=$shell"
+
+          # ── Verify ttyd đang lắng nghe ────────────────────────────────
+          Start-Sleep -Seconds 3
+          $listening = netstat -ano | Select-String ":7681"
+          if ($listening) {
+            Write-Host "✅ Port 7681 is listening"
+            Write-Host $listening
+          } else {
+            Write-Host "⚠️  Port 7681 not detected yet (may still be starting)"
+          }
+      # - name: Switch Docker to Linux engine (Windows only)
+      #   if: runner.os == 'Windows'
+      #   shell: pwsh
+      #   run: |
+      #     $dockerCli = "$env:ProgramFiles\Docker\Docker\DockerCli.exe"
+      #     if (Test-Path $dockerCli) {
+      #       Write-Host "DockerCli.exe found, switching to Linux engine..."
+      #       & $dockerCli -SwitchLinuxEngine
+      #       Write-Host "Waiting for Linux engine to start..."
+      #       Start-Sleep -Seconds 15
+      #     } else {
+      #       Write-Host "DockerCli.exe not found (GitHub-hosted runner) — skipping switch"
+      #     }
+      #     docker info
+      #     $os = (docker info --format '{{.OSType}}' 2>$null)
+      #     if ($os -eq "linux") {
+      #       Write-Host "✅ Docker Linux engine ready ($os)"
+      #     } else {
+      #       Write-Host "⚠️ Docker OS type: $os"
+      #       exit 1
+      #     }
+      # - name: Switch Docker to Linux engine (Windows only)
+      #   if: runner.os == 'Windows'
+      #   shell: pwsh
+      #   run: |
+      #     & "$env:ProgramFiles\Docker\Docker\DockerCli.exe" -SwitchLinuxEngine
+      #     Write-Host "Waiting for Linux engine to start..."
+      #     Start-Sleep -Seconds 15
+      #     docker info
+      #     Write-Host "✅ Docker Linux engine ready"
+
+      # ================================================================
+      #  SSH setup — CHỈ chạy trên Linux (webssh cần SSH vào host)
+      # ================================================================
+      - name: Generate SSH keypair & setup sshd
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p services/webssh/.ssh
+
+          ssh-keygen -t ed25519 -f ./services/webssh/.ssh/id_rsa -N "" -q
+          echo "✅ SSH keypair generated"
+
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          cat ./services/webssh/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          echo "✅ Public key added to authorized_keys"
+
+          sudo systemctl restart ssh && sleep 1
+          sudo systemctl is-active ssh \
+            && echo "✅ sshd is running" \
+            || { echo "❌ sshd failed"; exit 1; }
+
+      # ================================================================
+      #  Build & start — COMPOSE_PROFILES trong .env tự lọc services
+      # ================================================================
+      - name: Build & start services
+        shell: bash
+        run: docker compose up -d --build --remove-orphans
+
+      - name: Clean up unused images
+        shell: bash
+        run: docker image prune -f
+
+      - name: dotenvrtdb runner keepalive
+        shell: bash
+        run: dotenvrtdb runner keepalive
+
+      # ================================================================
+      #  Collect docker runtime artifacts
+      # ================================================================
+      - name: Collect docker runtime artifacts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          OUT_DIR="artifacts/docker-runtime"
+          mkdir -p "$OUT_DIR/logs"
+
+          docker compose ps -a             > "$OUT_DIR/compose-ps.txt"        2>&1
+          docker compose images            > "$OUT_DIR/compose-images.txt"    2>&1
+          docker compose logs --no-color   > "$OUT_DIR/compose-logs.txt"      2>&1
+          docker ps -a                     > "$OUT_DIR/docker-ps.txt"         2>&1
+          docker images                    > "$OUT_DIR/docker-images.txt"     2>&1
+          docker system df                 > "$OUT_DIR/docker-system-df.txt"  2>&1
+
+          CONTAINERS=$(docker compose ps -q)
+          if [ -n "$CONTAINERS" ]; then
+            for c in $CONTAINERS; do
+              docker inspect "$c" > "$OUT_DIR/inspect-$c.json" 2>&1
+              docker logs "$c"    > "$OUT_DIR/logs/$c.log"     2>&1
+            done
+          fi
+
+          [ -d logs ] && cp -r logs "$OUT_DIR/app-logs"
+
+      - name: Upload docker runtime artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: docker-runtime
+          path: artifacts/docker-runtime
+          if-no-files-found: warn
+          retention-days: 7
