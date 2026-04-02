@@ -6,7 +6,7 @@ trigger: none
 pr: none
 
 pool:
-  name: Default
+  vmImage: "ubuntu-latest"
 
 variables:
   # Khác biệt nền tảng: Azure dùng secret variable trong Pipeline/Variable Group.
@@ -86,6 +86,6 @@ steps:
     displayName: Publish docker runtime artifacts
     condition: always()
     inputs:
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)/docker-runtime'
-      ArtifactName: 'docker-runtime'
-      publishLocation: 'Container'
+      PathtoPublish: "$(Build.ArtifactStagingDirectory)/docker-runtime"
+      ArtifactName: "docker-runtime"
+      publishLocation: "Container"
