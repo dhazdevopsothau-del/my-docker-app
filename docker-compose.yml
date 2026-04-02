@@ -76,7 +76,7 @@ services:
     restart: unless-stopped
 
   # ================================================================
-  #  NODE.JS APP — Dịch vụ chính Hello World
+  #  NODE.JS APP — Dịch vụ chính
   # ================================================================
   app:
     build: ./services/app
@@ -130,7 +130,6 @@ services:
 
   # ================================================================
   #  WEBSSH — Linux: SSH vào host runner (full host access)
-  #  Có thể chạy mọi lệnh trên host, xem toàn bộ filesystem
   # ================================================================
   webssh:
     profiles: ["linux-only"]
@@ -149,7 +148,7 @@ services:
       - "ConnectTimeout=10"
       - "-t"
       - "${CUR_WHOAMI:-runner}@host.docker.internal"
-      - "cd ${CUR_WORK_DIR:-/home/runner/work} && exec $SHELL"
+      - "cd ${CUR_WORK_DIR:-/home/runner/work} && exec ${SHELL:-/bin/bash}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -163,7 +162,8 @@ services:
     restart: unless-stopped
 
   # ================================================================
-  #  WEBSSH — Windows: ttyd + docker CLI qua named pipe
+  #  WEBSSH — Windows: ttyd + docker CLI
+  #  Sau khi switch Linux engine, DOCKER_SOCK hoạt động bình thường
   #  Dùng để debug: docker logs, compose, exec khi có lỗi
   # ================================================================
   webssh-windows:
@@ -174,9 +174,7 @@ services:
       COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:-myapp}"
       COMPOSE_FILE: /workspace/docker-compose.yml
     volumes:
-      - type: npipe
-        source: \\.\pipe\docker_engine
-        target: /var/run/docker.sock
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       - .:/workspace
     working_dir: /workspace
     labels:
