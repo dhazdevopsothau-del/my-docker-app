@@ -1,313 +1,273 @@
 # my-docker-app
 
-Stack triển khai dịch vụ Docker hoàn chỉnh với reverse proxy, SSL tự động, tunnel ra ngoài Internet, và các công cụ quản lý/monitoring.
+Stack Docker mẫu để vận hành một ứng dụng Node.js theo hướng production-ready, có:
 
-## Kiến trúc tổng quan
-
-```
-Internet
-  │
-  ▼
-Cloudflare Edge
-  │  (Cloudflare Tunnel — không cần mở port)
-  ▼
-cloudflared (container)
-  │
-  ▼
-Caddy (reverse proxy + SSL tự động)
-  ├── app.domain.com      → Node.js App    [basic auth]
-  ├── portainer.domain.com → Portainer     [auth riêng]
-  ├── logs.domain.com     → Dozzle         [basic auth]
-  └── files.domain.com    → Filebrowser    [basic auth]
-
-Team nội bộ
-  │
-  ▼
-Tailscale VPN → Caddy (qua IP tailscale của máy chủ)
-```
-
-### Các thành phần
-
-| Service | Image | Mục đích |
-|---|---|---|
-| **Caddy** | `lucaslorentz/caddy-docker-proxy` | Reverse proxy, SSL Let's Encrypt tự động, đọc routes từ Docker labels |
-| **cloudflared** | `cloudflare/cloudflared` | Tunnel ra Internet, không cần mở port 80/443 trên firewall |
-| **Tailscale** | `tailscale/tailscale` | VPN cho team nội bộ truy cập |
-| **Node.js App** | build từ `./services/app` | Dịch vụ chính Hello World, ghi log ra file |
-| **Portainer** | `portainer/portainer-ce` | Quản lý Docker toàn diện: container, image, volume, network |
-| **Dozzle** | `amir20/dozzle` | Xem log realtime của tất cả container qua web UI |
-| **Filebrowser** | `filebrowser/filebrowser` | Duyệt, xem, tải file log qua web UI |
+- Reverse proxy tự động (Caddy + Docker labels)
+- Expose ra Internet qua Cloudflare Tunnel (không cần mở port public)
+- Truy cập nội bộ qua Tailscale (tuỳ chọn)
+- Quan sát hệ thống với Dozzle, Filebrowser, WebSSH
+- Pipeline triển khai qua GitHub Actions / Azure Pipelines
 
 ---
 
-## Yêu cầu hệ thống
+## 1) Tổng quan kiến trúc
 
-- Docker >= 24.x
-- Docker Compose >= 2.x
-- Git
-- Tên miền trỏ về Cloudflare (để dùng tunnel)
+### Thành phần chính
+
+| Thành phần | Vai trò |
+|---|---|
+| `caddy` | Reverse proxy, terminate TLS, đọc route từ Docker labels |
+| `cloudflared` | Tạo tunnel từ Cloudflare Edge vào `caddy` trong mạng nội bộ Docker |
+| `tailscale-linux` / `tailscale-windows` | Kết nối private network cho team nội bộ |
+| `app` | API Node.js (Express) với endpoint `/`, `/health`, `/logs/tail` |
+| `dozzle` | Xem log realtime của container |
+| `filebrowser` | Duyệt file, tải log |
+| `webssh` / `webssh-windows` | Truy cập shell host qua web (phục vụ vận hành/debug) |
+
+### Luồng request từ Internet
+
+```mermaid
+flowchart TD
+    A[Người dùng Internet] --> B[Cloudflare Edge]
+    B --> C[cloudflared container]
+    C --> D[Caddy reverse proxy]
+    D --> E[app]
+    D --> F[dozzle]
+    D --> G[filebrowser]
+    D --> H[webssh]
+```
+
+### Luồng triển khai CI/CD
+
+```mermaid
+flowchart LR
+    A[Developer push code] --> B[GitHub Actions / Azure Pipelines]
+    B --> C[Build + Deploy docker compose]
+    C --> D[Collect docker-runtime artifacts]
+    D --> E[Quan sát logs / inspect khi sự cố]
+```
 
 ---
 
-## Cài đặt lần đầu
+## 2) Cấu trúc codebase
 
-### 1. Clone repo và chuẩn bị .env
+```text
+my-docker-app/
+├── docker-compose.yml
+├── .env.example
+├── cloudflared/
+│   ├── config.yml
+│   └── config.yml.example
+├── services/
+│   ├── app/
+│   │   ├── Dockerfile
+│   │   ├── index.js
+│   │   └── package.json
+│   ├── webssh/
+│   └── webssh-docker/
+└── docs/
+    ├── docker-app.md
+    ├── docker-caddy.md
+    ├── docker-cloudflared.md
+    ├── docker-dozzle.md
+    ├── docker-filebrowser.md
+    ├── docker-portainer.md
+    └── docker-tailscale.md
+```
+
+---
+
+## 3) Quick start (flow rõ từng bước)
+
+```mermaid
+flowchart TD
+    S1[1. Clone repo] --> S2[2. Tạo file .env từ .env.example]
+    S2 --> S3[3. Sinh bcrypt cho CADDY_AUTH_HASH]
+    S3 --> S4[4. Cấu hình Cloudflare Tunnel + credentials]
+    S4 --> S5[5. Chọn profile tailscale/webssh theo OS]
+    S5 --> S6[6. docker compose up -d --build]
+    S6 --> S7[7. Verify endpoints: /health, logs UI, filebrowser]
+```
+
+### Bước 1: Clone
 
 ```bash
-git clone https://github.com/your/repo.git
+git clone <repo-url>
 cd my-docker-app
+```
+
+### Bước 2: Tạo `.env`
+
+```bash
 cp .env.example .env
 ```
 
-Mở `.env` và điền đầy đủ các giá trị (xem phần **Cấu hình .env** bên dưới).
+Sau đó chỉnh các biến quan trọng:
 
-### 2. Tạo bcrypt hash cho mật khẩu Caddy
+- `DOMAIN`, `APP_HOST`, `CADDY_EMAIL`
+- `CADDY_AUTH_USER`, `CADDY_AUTH_HASH`
+- `TAILSCALE_CLIENT_SECRET` (nếu dùng Tailscale)
+- `SUBDOMAIN_*` cho từng service
 
-```bash
-docker run --rm caddy:alpine caddy hash-password --plaintext "matkhauCuaBan"
-```
+> Lưu ý: `docker-compose.yml` hiện dùng `TAILSCALE_CLIENT_SECRET`, vì vậy bạn nên đặt đúng tên biến này trong `.env`.
 
-Copy output (bắt đầu bằng `$2a$14$...`) vào `CADDY_AUTH_HASH` trong `.env`.
-
-### 3. Tạo Cloudflare Tunnel
-
-1. Vào [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → **Networks → Tunnels**
-2. **Create a tunnel** → chọn **Cloudflared** → đặt tên tunnel
-3. Copy **Token** → điền vào `CF_TUNNEL_TOKEN` trong `.env`
-4. Cấu hình **Public Hostnames** trong dashboard:
-
-| Subdomain | Domain | Service |
-|---|---|---|
-| `app` | `yourdomain.com` | `http://caddy:80` |
-| `portainer` | `yourdomain.com` | `http://caddy:80` |
-| `logs` | `yourdomain.com` | `http://caddy:80` |
-| `files` | `yourdomain.com` | `http://caddy:80` |
-
-### 4. Cài GitHub Actions Self-hosted Runner
+### Bước 3: Sinh hash mật khẩu Caddy
 
 ```bash
-# Trên máy chủ của bạn:
-mkdir -p ~/actions-runner && cd ~/actions-runner
-
-# Lấy lệnh cài đặt từ:
-# GitHub repo → Settings → Actions → Runners → New self-hosted runner
-# Chọn Linux → copy và chạy các lệnh hướng dẫn
-
-# Cài làm service chạy nền (chạy một lần):
-sudo ./svc.sh install
-sudo ./svc.sh start
+docker run --rm caddy:alpine caddy hash-password --plaintext "<mat_khau_moi>"
 ```
 
-Sau khi cài, runner xuất hiện tại **Settings → Actions → Runners** với trạng thái **Idle**.
+Copy kết quả vào `CADDY_AUTH_HASH` (nếu dùng trong `.env`, nhớ escape ký tự `$` theo format đang ghi chú).
 
-> **Azure DevOps**: Vào **Project Settings → Agent pools → Add pool** → Self-hosted → thêm agent tương tự.
+### Bước 4: Cloudflare Tunnel
 
-### 5. Khởi động lần đầu (thủ công)
+`cloudflared` trong repo đang chạy bằng file config + credentials:
+
+- `./cloudflared/config.yml`
+- `./cloudflared-credentials.json`
+
+Bạn cần:
+
+1. Tạo tunnel trong Cloudflare Zero Trust
+2. Cập nhật hostname mapping trỏ về `http://caddy:80`
+3. Điền `tunnel` + `credentials-file` phù hợp trong `cloudflared/config.yml`
+
+### Bước 5: Chọn profile theo môi trường
+
+- Linux host:
+  - Dùng profile `linux-only` cho `tailscale-linux` + `webssh`
+- Windows host:
+  - Dùng profile `windows-only` cho `tailscale-windows` + `webssh-windows`
+
+Ví dụ:
 
 ```bash
-# Trên máy chủ, tại thư mục project:
-docker compose up -d --build
+# Linux
+docker compose --profile linux-only up -d --build
+
+# Windows
+docker compose --profile windows-only up -d --build
 ```
 
-Hoặc push code lên nhánh `main` — pipeline tự động chạy.
-
-### Artifacts sau mỗi lần CI/CD chạy
-
-- **Azure Pipelines** và **GitHub Actions** đều thu thập artifacts runtime sau deploy.
-- Artifact tên `docker-runtime` bao gồm:
-  - trạng thái container/images (`docker compose ps/images`, `docker ps/images`),
-  - log tổng hợp (`docker compose logs`),
-  - `docker inspect` + log riêng cho từng container,
-  - snapshot thư mục `logs/` (nếu có).
-- Mục đích: hỗ trợ debug nhanh khi deploy lỗi hoặc service bất thường.
-
----
-
-## Cấu hình .env
-
-### DOMAIN & EMAIL
-
-```env
-DOMAIN=yourdomain.com
-```
-Domain chính. Tất cả subdomains sẽ là `xxx.yourdomain.com`.
-
-```env
-CADDY_EMAIL=admin@yourdomain.com
-```
-Email để Let's Encrypt gửi thông báo khi cert sắp hết hạn. Caddy tự gia hạn cert.
-
----
-
-### Caddy Basic Auth
-
-```env
-CADDY_AUTH_USER=admin
-CADDY_AUTH_HASH=$2a$14$...
-```
-
-- `CADDY_AUTH_USER`: tên đăng nhập (dùng chung cho app, dozzle, filebrowser)
-- `CADDY_AUTH_HASH`: bcrypt hash của mật khẩu
-
-**Tạo hash:**
-```bash
-docker run --rm caddy:alpine caddy hash-password --plaintext "matkhauMoi"
-```
-
-**Lưu ý:** Portainer có trang login riêng nên không dùng Caddy basic auth. Lần đầu vào `portainer.domain.com` sẽ tạo tài khoản admin.
-
----
-
-### Cloudflare Tunnel
-
-```env
-CF_TUNNEL_TOKEN=eyJhI...
-```
-
-Token lấy từ Cloudflare Zero Trust → Tunnels. Token đã bao gồm thông tin tunnel ID và credentials, không cần file config riêng.
-
----
-
-### Tailscale
-
-```env
-TS_AUTHKEY=tskey-auth-xxxxx
-```
-
-Auth key để máy chủ tự động join Tailscale network. Tạo tại [Tailscale Admin → Keys](https://login.tailscale.com/admin/settings/keys).
-
-Nên tích:
-- **Reusable**: để dùng lại khi restart container
-- **Ephemeral**: tự xoá khỏi network nếu mất kết nối lâu
-
-Sau khi chạy, team kết nối Tailscale VPN rồi truy cập `http://<IP-tailscale>` là vào được Caddy.
-
----
-
-### Node.js App
-
-```env
-APP_PORT=3000
-NODE_ENV=production
-LOG_DIR=/app/logs
-```
-
-- `APP_PORT`: port bên trong container, Caddy proxy vào đây
-- `LOG_DIR`: đường dẫn log bên trong container, được mount ra `./logs/app/` trên host
-
----
-
-### Subdomains
-
-```env
-PORTAINER_SUBDOMAIN=portainer
-DOZZLE_SUBDOMAIN=logs
-```
-
-Tùy chỉnh subdomain cho từng dịch vụ. Mặc định:
-- `portainer.yourdomain.com`
-- `logs.yourdomain.com`
-- `files.yourdomain.com`
-
----
-
-## Truy cập các dịch vụ
-
-| URL | Dịch vụ | Auth |
-|---|---|---|
-| `https://app.yourdomain.com` | Node.js Hello World | Caddy basic auth |
-| `https://portainer.yourdomain.com` | Portainer dashboard | Login Portainer |
-| `https://logs.yourdomain.com` | Dozzle — log realtime | Caddy basic auth |
-| `https://files.yourdomain.com` | Filebrowser — log files | Caddy basic auth |
-
----
-
-## Thêm dịch vụ mới
-
-Chỉ cần thêm vào `docker-compose.yml` với labels tương ứng:
-
-```yaml
-  my-new-service:
-    image: some-image:latest
-    labels:
-      caddy: "new.${DOMAIN}"
-      caddy.reverse_proxy: "{{upstreams 8000}}"
-      # Thêm basic auth nếu cần:
-      caddy.basicauth: "/*"
-      caddy.basicauth.${CADDY_AUTH_USER}: "${CADDY_AUTH_HASH}"
-    networks: [app_net]
-```
-
-Push code → pipeline tự deploy. Không cần sửa gì thêm.
-
----
-
-## Cấu trúc thư mục
-
-```
-my-docker-app/
-├── .env.example               # Template cấu hình (copy thành .env)
-├── .gitignore
-├── docker-compose.yml         # Stack chính
-├── azure-pipelines.yml        # CI/CD Azure DevOps
-├── README.md
-│
-├── .github/
-│   └── workflows/
-│       └── deploy.yml         # CI/CD GitHub Actions
-│
-├── cloudflared/
-│   └── config.yml.example     # Template config tunnel (nếu không dùng token)
-│
-├── services/
-│   └── app/                   # Node.js service
-│       ├── Dockerfile
-│       ├── package.json
-│       └── index.js
-│
-└── logs/                      # Log files (gitignored, tạo khi chạy)
-    └── app/
-        └── app.log
-```
-
----
-
-## Lệnh thường dùng
+### Bước 6: Kiểm tra nhanh sau khi chạy
 
 ```bash
-# Khởi động toàn bộ stack
+docker compose ps
+docker compose logs -f --tail=100 app
+curl -sS http://localhost:${APP_PORT:-3000}/health
+```
+
+---
+
+## 4) Endpoint & truy cập
+
+### API app
+
+- `GET /` → thông tin service
+- `GET /health` → trạng thái app + uptime
+- `GET /logs/tail` → 50 dòng log cuối
+
+### Dịch vụ qua Caddy (theo `SUBDOMAIN_*`)
+
+- `app.<DOMAIN>` → Node.js app
+- `logs.<DOMAIN>` (hoặc subdomain cấu hình) → Dozzle
+- `files.<DOMAIN>` (hoặc subdomain cấu hình) → Filebrowser
+- `ttyd.<DOMAIN>` (hoặc subdomain cấu hình) → WebSSH
+
+---
+
+## 5) Lệnh vận hành thường dùng
+
+```bash
+# Chạy stack
 docker compose up -d
 
-# Build lại và khởi động (sau khi sửa code)
+# Build lại + chạy
 docker compose up -d --build
-
-# Xem log realtime tất cả service
-docker compose logs -f
-
-# Xem log một service cụ thể
-docker compose logs -f app
-
-# Restart một service
-docker compose restart app
-
-# Dừng toàn bộ stack
-docker compose down
-
-# Dừng và xoá volumes (reset hoàn toàn)
-docker compose down -v
 
 # Xem trạng thái
 docker compose ps
 
-# Vào shell trong container
-docker compose exec app sh
+# Theo dõi log toàn bộ
+docker compose logs -f
+
+# Theo dõi log app
+docker compose logs -f app
+
+# Restart riêng app
+docker compose restart app
+
+# Dừng stack
+docker compose down
+
+# Dừng + xoá volume
+docker compose down -v
 ```
 
 ---
 
-## Lưu ý bảo mật
+## 6) Mở rộng dự án (gợi ý thực tế)
 
-- File `.env` chứa secrets — **không bao giờ commit lên git**
-- Portainer có quyền quản lý toàn bộ Docker — nên đặt mật khẩu mạnh
-- Caddy basic auth là HTTP Basic Auth — chỉ nên dùng với HTTPS (đã có SSL)
-- Cloudflare Tunnel không cần mở port 22, 80, 443 trên firewall — chỉ cần outbound internet
+### 6.1 Thêm service mới sau Caddy
+
+Chỉ cần thêm service + labels trong `docker-compose.yml`:
+
+```yaml
+my-new-service:
+  image: your-image:latest
+  labels:
+    - "caddy=http://new.${DOMAIN}"
+    - "caddy.reverse_proxy={{upstreams 8080}}"
+    - "caddy.basic_auth=/*"
+    - "caddy.basic_auth.${CADDY_AUTH_USER}=${CADDY_AUTH_HASH}"
+  networks: [app_net]
+```
+
+### 6.2 Tách môi trường `dev/staging/prod`
+
+- Dùng nhiều file compose:
+  - `docker-compose.yml` (base)
+  - `docker-compose.prod.yml` (override prod)
+- Tách `.env` theo môi trường
+- Map subdomain riêng: `staging-api`, `api`, ...
+
+### 6.3 Nâng cấp quan sát
+
+- Thêm metrics/log stack (Prometheus + Grafana, Loki)
+- Healthcheck chuẩn cho từng container
+- Cảnh báo khi container restart bất thường
+
+### 6.4 Bảo mật nâng cao
+
+- Chuyển từ Basic Auth sang SSO/Access Policy (Cloudflare Access)
+- Giới hạn IP / mTLS cho endpoint admin
+- Tách quyền đọc log và quyền shell (webssh) theo vai trò
+
+### 6.5 Chuẩn hoá vận hành team
+
+- Thêm Makefile / task runner cho lệnh common
+- Viết runbook sự cố (mất tunnel, cert lỗi, app crash)
+- Chuẩn hoá backup cho volumes quan trọng
+
+---
+
+## 7) Lưu ý bảo mật
+
+- Không commit `.env`, `cloudflared-credentials.json`, private key SSH
+- `webssh` cho quyền truy cập rất mạnh, chỉ bật khi thật sự cần
+- Dùng mật khẩu mạnh và rotate định kỳ cho tài khoản bảo vệ qua Caddy
+- Bật audit log cho nền tảng CI/CD nếu triển khai production
+
+---
+
+## 8) Tài liệu chi tiết
+
+Xem thêm trong thư mục `docs/`:
+
+- `docs/docker-app.md`
+- `docs/docker-caddy.md`
+- `docs/docker-cloudflared.md`
+- `docs/docker-dozzle.md`
+- `docs/docker-filebrowser.md`
+- `docs/docker-portainer.md`
+- `docs/docker-tailscale.md`
